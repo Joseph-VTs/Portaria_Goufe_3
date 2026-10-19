@@ -1,12 +1,11 @@
 import sqlite3
 import datetime
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import uvicorn
 
 app = FastAPI(title="Portaria Inteligente - Controle de Acesso de Veículos")
 
-# Nome do banco de dados local
 DB_NAME = "portaria.db"
 
 def inicializar_banco():
@@ -14,7 +13,6 @@ def inicializar_banco():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     
-    # Tabela de veículos autorizados (Moradores com passagem livre)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS veiculos_autorizados (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -25,7 +23,6 @@ def inicializar_banco():
         )
     ''')
     
-    # Tabela de histórico de acessos da portaria
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS historico_acessos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -36,29 +33,30 @@ def inicializar_banco():
         )
     ''')
     
-    # Inserir o veículo de teste (INSERT OR IGNORE evita erros se já existir)
+    # Inserir o veículo de teste inicial
     cursor.execute('''
         INSERT OR IGNORE INTO veiculos_autorizados (placa, proprietario, unidade, status)
-        VALUES ('IRV4I78', 'Morador Principal', 'Bloco A - Apt 101', 'ativo')
+        VALUES ('Placa', 'Morador Principal', 'Bloco A - Apt 101', 'ativo')
     ''')
     
     conn.commit()
     conn.close()
 
-# Inicializa o banco ao subir o script
 inicializar_banco()
 
-# Modelo de dados recebido
+# Modelos de Dados (Pydantic)
 class LeituraPlacaRequest(BaseModel):
     placa: str
     confianca: float
 
+class CadastroVeiculoRequest(BaseModel):
+    placa: str
+    proprietario: str
+    unidade: str
+
 @app.post("/api/v1/acesso/verificar-placa")
 def verificar_placa_morador(dados: LeituraPlacaRequest):
-    """
-    Rota principal da portaria: recebe a placa lida,
-    consulta o banco e decide a liberação (passagem livre).
-    """
+    """Verifica se a placa lida pela câmera está autorizada no condomínio."""
     placa_limpa = dados.placa.upper().strip()
     agora = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
@@ -98,6 +96,45 @@ def verificar_placa_morador(dados: LeituraPlacaRequest):
         "mensagem": mensagem,
         "timestamp": agora
     }
+
+@app.post("/api/v1/veiculos/cadastrar")
+def cadastrar_veiculo(dados: CadastroVeiculoRequest):
+    """Cadastra um novo morador / veículo no sistema de passagem livre."""
+    placa_limpa = dados.placa.upper().strip()
+    
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute(
+            "INSERT INTO veiculos_autorizados (placa, proprietario, unidade, status) VALUES (?, ?, ?, 'ativo')",
+            (placa_limpa, dados.proprietario, dados.unidade)
+        )
+        conn.commit()
+        conn.close()
+        return {"sucesso": True, "mensagem": f"Veículo de placa {placa_limpa} cadastrado com sucesso para {dados.proprietario} ({dados.unidade})."}
+    except sqlite3.IntegrityError:
+        conn.close()
+        raise HTTPException(status_code=400, detail=f"A placa {placa_limpa} já está cadastrada no sistema.")
+
+@app.get("/api/v1/veiculos")
+def listar_veiculos():
+    """Lista todos os veículos cadastrados no sistema de portaria."""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT placa, proprietario, unidade, status FROM veiculos_autorizados")
+    linhas = cursor.fetchall()
+    conn.close()
+    
+    veiculos = []
+    for linha in linhas:
+        veiculos.append({
+            "placa": linha[0],
+            "proprietario": linha[1],
+            "unidade": linha[2],
+            "status": linha[3]
+        })
+    return {"total": len(veiculos), "veiculos": veiculos}
 
 if __name__ == "__main__":
     print("Iniciando Servidor Backend da Portaria em http://127.0.0.1:8000...")
